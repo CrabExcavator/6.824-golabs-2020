@@ -344,8 +344,9 @@ type AppendEntriesArgs struct {
 }
 
 type AppendEntriesReply struct {
-	Term    int
-	Success bool
+	Term        int
+	LastApplied int
+	Success     bool
 }
 
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
@@ -361,6 +362,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 	reply.Term = rf.state.currentTerm
 	reply.Success = false
+	reply.LastApplied = rf.state.lastApplied
 	if flag && args.PrevLogIndex >= 0 && args.PrevLogIndex <= lastLogIndex {
 		reviseIndex := rf.reviseIndex(args.PrevLogIndex)
 		if reviseIndex < 0 {
@@ -688,7 +690,7 @@ func (rf *Raft) doHeartBeat() {
 								}
 								return b
 							}
-							rf.state.nextIndex[peer] = max(rf.state.nextIndex[peer]-100, 1)
+							rf.state.nextIndex[peer] = max(reply.LastApplied, 1)
 						}
 					}
 				}
@@ -835,10 +837,10 @@ func Make(peers []*labrpc.ClientEnd, me int,
 		lastIncludedTerm:  0,
 		data:              nil,
 	}
-	rf.randGen = NewRandomGen(time.Millisecond*500, time.Millisecond*600, me)
+	rf.randGen = NewRandomGen(time.Millisecond*400, time.Millisecond*500, me)
 	rf.timeOut = time.NewTimer(rf.randGen.random())
 	rf.heartBeatTicker = time.NewTicker(time.Millisecond * 150)
-	rf.applyTicker = time.NewTicker(time.Millisecond * 300)
+	rf.applyTicker = time.NewTicker(time.Millisecond * 150)
 
 	go func() {
 		for {

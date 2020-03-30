@@ -214,6 +214,7 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 			e.Encode(kv.kvTable)
 			data := w.Bytes()
 			kv.rf.StartSnapShot(index, data)
+			//log.Println(kv.me, "persist")
 		}
 	}
 
@@ -229,6 +230,7 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	}
 
 	installSnapShot(persister.ReadSnapshot())
+	//log.Println(kv.me, "restart")
 
 	// You may need initialization code here.
 	go func() {
