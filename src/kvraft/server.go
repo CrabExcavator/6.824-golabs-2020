@@ -3,13 +3,15 @@ package kvraft
 import (
 	"../labgob"
 	"../labrpc"
-	"log"
 	"../raft"
+	"bytes"
+	"log"
 	"sync"
 	"sync/atomic"
+	"time"
 )
 
-const Debug = 0
+const Debug = 1
 
 func DPrintf(format string, a ...interface{}) (n int, err error) {
 	if Debug > 0 {
@@ -18,11 +20,39 @@ func DPrintf(format string, a ...interface{}) (n int, err error) {
 	return
 }
 
+func isClosedWrite(ch <-chan PutAppendReply) bool {
+	select {
+	case <-ch:
+		return true
+	default:
+	}
+
+	return false
+}
+
+func isClosedRead(ch <-chan GetReply) bool {
+	select {
+	case <-ch:
+		return true
+	default:
+	}
+
+	return false
+}
 
 type Op struct {
 	// Your definitions here.
 	// Field names must start with capital letters,
 	// otherwise RPC will break.
+	WaitWriteCh chan PutAppendReply
+	WaitReadCh  chan GetReply
+
+	ID      int
+	Client  int64
+	NodeNum int
+	OpType  string
+	Key     string
+	Value   string
 }
 
 type KVServer struct {
@@ -35,15 +65,93 @@ type KVServer struct {
 	maxraftstate int // snapshot if log grows this big
 
 	// Your definitions here.
+	appliedID map[int64]int
+	kvTable   map[string]string
+	sink      int
 }
 
 
 func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 	// Your code here.
+	kv.mu.Lock()
+	cink := kv.appliedID[args.Client]
+	kv.mu.Unlock()
+
+	if cink < args.ID {
+		op := Op{
+			ID:         args.ID,
+			Client:     args.Client,
+			NodeNum:    kv.me,
+			WaitReadCh: make(chan GetReply),
+			OpType:     "Get",
+			Key:        args.Key,
+		}
+		kv.rf.Start(op)
+
+		t := time.NewTimer(time.Second * 1)
+		defer t.Stop()
+		select {
+		case wait := <-op.WaitReadCh:
+			{
+				close(op.WaitReadCh)
+				op.WaitReadCh = nil
+				reply.Sink = wait.Sink
+				reply.Err = wait.Err
+				reply.Value = wait.Value
+			}
+		case <-t.C:
+			{
+				close(op.WaitReadCh)
+				op.WaitReadCh = nil
+				reply.Err = "Time Out"
+			}
+		}
+	} else {
+		reply.Err = "Applied"
+		kv.mu.Lock()
+		reply.Value = kv.kvTable[args.Key]
+		kv.mu.Unlock()
+	}
 }
 
 func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	// Your code here.
+	kv.mu.Lock()
+	cink := kv.appliedID[args.Client]
+	kv.mu.Unlock()
+
+	if cink < args.ID {
+		op := Op{
+			ID:          args.ID,
+			Client:      args.Client,
+			NodeNum:     kv.me,
+			WaitWriteCh: make(chan PutAppendReply),
+			OpType:      args.Op,
+			Key:         args.Key,
+			Value:       args.Value,
+		}
+		kv.rf.Start(op)
+
+		t := time.NewTimer(time.Second * 1)
+		defer t.Stop()
+		select {
+		case wait := <-op.WaitWriteCh:
+			{
+				close(op.WaitWriteCh)
+				op.WaitWriteCh = nil
+				reply.Sink = wait.Sink
+				reply.Err = wait.Err
+			}
+		case <-t.C:
+			{
+				close(op.WaitWriteCh)
+				op.WaitWriteCh = nil
+				reply.Err = "Time Out"
+			}
+		}
+	} else {
+		reply.Err = "Applied"
+	}
 }
 
 //
@@ -91,11 +199,117 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv.maxraftstate = maxraftstate
 
 	// You may need initialization code here.
+	kv.sink = 0
+	kv.kvTable = make(map[string]string)
+	kv.appliedID = make(map[int64]int)
 
-	kv.applyCh = make(chan raft.ApplyMsg)
+	kv.applyCh = make(chan raft.ApplyMsg, 10000)
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
 
+	checkSnapShot := func(index int) {
+		if kv.maxraftstate != -1 && persister.RaftStateSize() >= kv.maxraftstate {
+			w := new(bytes.Buffer)
+			e := labgob.NewEncoder(w)
+			e.Encode(kv.kvTable)
+			e.Encode(kv.appliedID)
+			data := w.Bytes()
+			kv.rf.StartSnapShot(index, data)
+		}
+	}
+
+	installSnapShot := func(data []byte) {
+		if data == nil || len(data) < 1 {
+			return
+		}
+		r := bytes.NewBuffer(data)
+		d := labgob.NewDecoder(r)
+		if d.Decode(&kv.kvTable) != nil && d.Decode(&kv.appliedID) != nil {
+			log.Println("decode error")
+		}
+	}
+
+	installSnapShot(persister.ReadSnapshot())
+
 	// You may need initialization code here.
+	go func() {
+
+		max := func(a int, b int) int {
+			if a > b {
+				return a
+			}
+			return b
+		}
+
+		for {
+			select {
+			case applyMsg := <-kv.applyCh:
+				{
+					kv.mu.Lock()
+
+					kv.sink = max(kv.sink, applyMsg.CommandIndex)
+					if applyMsg.IsSnapShot {
+						installSnapShot(persister.ReadSnapshot())
+						checkSnapShot(kv.sink)
+						kv.mu.Unlock()
+						continue
+					}
+					op := applyMsg.Command.(Op)
+					if op.OpType == "Put" || op.OpType == "Append" {
+						//log.Println(kv.me, kv.appliedID[op.Client], op.ID)
+						if kv.appliedID[op.Client] >= op.ID {
+							kv.mu.Unlock()
+							continue
+						}
+
+						if applyMsg.CommandValid == true {
+							kv.appliedID[op.Client] = op.ID
+							switch op.OpType {
+							case "Put":
+								{
+									kv.kvTable[op.Key] = op.Value
+								}
+							case "Append":
+								{
+									kv.kvTable[op.Key] += op.Value
+								}
+							}
+							if op.NodeNum == kv.me && op.WaitWriteCh != nil && !isClosedWrite(op.WaitWriteCh) {
+								op.WaitWriteCh <- PutAppendReply{
+									Err:  "",
+									Sink: applyMsg.CommandIndex,
+								}
+							}
+						} else if op.WaitWriteCh != nil && !isClosedWrite(op.WaitWriteCh) {
+							op.WaitWriteCh <- PutAppendReply{
+								Err:  "Not Leader",
+								Sink: applyMsg.CommandIndex,
+							}
+						}
+					} else if op.OpType == "Get" {
+						if applyMsg.CommandValid == true {
+							kv.appliedID[op.Client] = op.ID
+							if op.NodeNum == kv.me && op.WaitReadCh != nil && !isClosedRead(op.WaitReadCh) {
+								op.WaitReadCh <- GetReply{
+									Err:   "",
+									Sink:  applyMsg.CommandIndex,
+									Value: kv.kvTable[op.Key],
+								}
+							}
+						} else if op.WaitReadCh != nil && !isClosedRead(op.WaitReadCh) {
+							op.WaitReadCh <- GetReply{
+								Err: "Not Leader",
+							}
+						}
+					}
+
+					if applyMsg.CommandValid {
+						checkSnapShot(kv.sink)
+					}
+					kv.mu.Unlock()
+				}
+			}
+		}
+	}()
 
 	return kv
 }

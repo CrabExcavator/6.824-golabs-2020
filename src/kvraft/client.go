@@ -1,6 +1,9 @@
 package kvraft
 
-import "../labrpc"
+import (
+	"../labrpc"
+	"time"
+)
 import "crypto/rand"
 import "math/big"
 
@@ -8,6 +11,10 @@ import "math/big"
 type Clerk struct {
 	servers []*labrpc.ClientEnd
 	// You will have to modify this struct.
+	master int
+	msgID  int
+	me     int64
+	//sink int
 }
 
 func nrand() int64 {
@@ -21,6 +28,10 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 	ck := new(Clerk)
 	ck.servers = servers
 	// You'll have to add code here.
+	ck.master = 0
+	ck.msgID = 0
+	ck.me = nrand()
+	//ck.sink = 0
 	return ck
 }
 
@@ -37,9 +48,54 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 // arguments. and reply must be passed as a pointer.
 //
 func (ck *Clerk) Get(key string) string {
-
+	//log.Println("get")
 	// You will have to modify this function.
-	return ""
+	ret := ""
+	currentServer := ck.master
+	rID := ck.msgID + 1
+	ck.msgID++
+	flag := false
+	for {
+		args := GetArgs{
+			ID:     rID,
+			Client: ck.me,
+			Key:    key,
+		}
+		reply := GetReply{}
+		ok := ck.servers[currentServer].Call("KVServer.Get", &args, &reply)
+		if ok {
+			if len(reply.Err) == 0 {
+				ret = reply.Value
+				break
+			} else {
+				//log.Println(reply.Err)
+				switch reply.Err {
+				case "Not Leader":
+					{
+						currentServer = (currentServer + 1) % len(ck.servers)
+					}
+				case "Time Out":
+					{
+						currentServer = (currentServer + 1) % len(ck.servers)
+					}
+				case "Applied":
+					{
+						ret = reply.Value
+						flag = true
+						break
+					}
+				}
+				if flag {
+					break
+				}
+			}
+		} else {
+			currentServer = (currentServer + 1) % len(ck.servers)
+		}
+		time.Sleep(time.Millisecond * 100)
+	}
+	ck.master = currentServer
+	return ret
 }
 
 //
@@ -53,7 +109,52 @@ func (ck *Clerk) Get(key string) string {
 // arguments. and reply must be passed as a pointer.
 //
 func (ck *Clerk) PutAppend(key string, value string, op string) {
+	//log.Println("put")
 	// You will have to modify this function.
+	currentServer := ck.master
+	rID := ck.msgID + 1
+	ck.msgID++
+	flag := false
+	for {
+		args := PutAppendArgs{
+			ID:     rID,
+			Client: ck.me,
+			Key:    key,
+			Value:  value,
+			Op:     op,
+		}
+		reply := GetReply{}
+		ok := ck.servers[currentServer].Call("KVServer.PutAppend", &args, &reply)
+		if ok {
+			if len(reply.Err) == 0 {
+				break
+			} else {
+				//log.Println(reply.Err)
+				switch reply.Err {
+				case "Not Leader":
+					{
+						currentServer = (currentServer + 1) % len(ck.servers)
+					}
+				case "Time Out":
+					{
+						currentServer = (currentServer + 1) % len(ck.servers)
+					}
+				case "Applied":
+					{
+						flag = true
+						break
+					}
+				}
+				if flag {
+					break
+				}
+			}
+		} else {
+			currentServer = (currentServer + 1) % len(ck.servers)
+		}
+		time.Sleep(time.Millisecond * 100)
+	}
+	ck.master = currentServer
 }
 
 func (ck *Clerk) Put(key string, value string) {
