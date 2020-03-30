@@ -208,7 +208,6 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 
 	checkSnapShot := func(index int) {
 		if kv.maxraftstate != -1 && persister.RaftStateSize() >= kv.maxraftstate {
-			log.Println("startSnapShot")
 			w := new(bytes.Buffer)
 			e := labgob.NewEncoder(w)
 			e.Encode(kv.appliedID)
