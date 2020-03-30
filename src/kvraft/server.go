@@ -47,7 +47,7 @@ type Op struct {
 	WaitWriteCh chan PutAppendReply
 	WaitReadCh  chan GetReply
 
-	ID      int
+	ID      int64
 	Client  int64
 	NodeNum int
 	OpType  string
@@ -65,7 +65,7 @@ type KVServer struct {
 	maxraftstate int // snapshot if log grows this big
 
 	// Your definitions here.
-	appliedID map[int64]int
+	appliedID map[int64]int64
 	kvTable   map[string]string
 	sink      int
 }
@@ -201,17 +201,18 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	// You may need initialization code here.
 	kv.sink = 0
 	kv.kvTable = make(map[string]string)
-	kv.appliedID = make(map[int64]int)
+	kv.appliedID = make(map[int64]int64)
 
 	kv.applyCh = make(chan raft.ApplyMsg, 10000)
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
 
 	checkSnapShot := func(index int) {
 		if kv.maxraftstate != -1 && persister.RaftStateSize() >= kv.maxraftstate {
+			log.Println("startSnapShot")
 			w := new(bytes.Buffer)
 			e := labgob.NewEncoder(w)
-			e.Encode(kv.kvTable)
 			e.Encode(kv.appliedID)
+			e.Encode(kv.kvTable)
 			data := w.Bytes()
 			kv.rf.StartSnapShot(index, data)
 		}
@@ -223,7 +224,7 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 		}
 		r := bytes.NewBuffer(data)
 		d := labgob.NewDecoder(r)
-		if d.Decode(&kv.kvTable) != nil && d.Decode(&kv.appliedID) != nil {
+		if d.Decode(&kv.appliedID) != nil || d.Decode(&kv.kvTable) != nil {
 			log.Println("decode error")
 		}
 	}
@@ -254,13 +255,11 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 						continue
 					}
 					op := applyMsg.Command.(Op)
+					if kv.appliedID[op.Client] >= op.ID {
+						kv.mu.Unlock()
+						continue
+					}
 					if op.OpType == "Put" || op.OpType == "Append" {
-						//log.Println(kv.me, kv.appliedID[op.Client], op.ID)
-						if kv.appliedID[op.Client] >= op.ID {
-							kv.mu.Unlock()
-							continue
-						}
-
 						if applyMsg.CommandValid == true {
 							kv.appliedID[op.Client] = op.ID
 							switch op.OpType {
@@ -273,6 +272,7 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 									kv.kvTable[op.Key] += op.Value
 								}
 							}
+							//log.Println(kv.me, op.OpType, "<", op.Key, op.Value, ">", op.ID)
 							if op.NodeNum == kv.me && op.WaitWriteCh != nil && !isClosedWrite(op.WaitWriteCh) {
 								op.WaitWriteCh <- PutAppendReply{
 									Err:  "",

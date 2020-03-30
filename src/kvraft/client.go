@@ -12,7 +12,7 @@ type Clerk struct {
 	servers []*labrpc.ClientEnd
 	// You will have to modify this struct.
 	master int
-	msgID  int
+	msgID  int64
 	me     int64
 	//sink int
 }
